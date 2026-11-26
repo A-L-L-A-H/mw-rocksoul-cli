@@ -71,7 +71,7 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 }
 
 func printRootUsage(w io.Writer) {
-	fmt.Fprintf(w, `Rocksoul CLI (%s) — Zero-friction coding agent & MoonWitness AI client
+	fmt.Fprintf(w, `Rocksoul CLI (%s) â€” Zero-friction coding agent & MoonWitness AI client
 
 Usage:
   rocksoul                        Launch interactive coding chat immediately
@@ -417,7 +417,7 @@ func cmdLogin(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			}
 			fmt.Fprintf(stdout, "  Token Status : %s (token=%s subject=%s)\n", state, clients.MaskToken(tok.AccessToken), tok.Subject)
 		} else {
-			fmt.Fprintf(stdout, "  Token Status : not logged in (optional — run `rocksoul login --start` for RID SSO)\n")
+			fmt.Fprintf(stdout, "  Token Status : not logged in (optional â€” run `rocksoul login --start` for RID SSO)\n")
 		}
 	}
 	return 0
@@ -543,7 +543,7 @@ func firstOrDefault(value, fallback string) string {
 }
 
 func renderMCPTools(w io.Writer, baseURL string, tools []clients.MCPTool) {
-	fmt.Fprintf(w, "MCP Tools (%s) — %d available\n", baseURL, len(tools))
+	fmt.Fprintf(w, "MCP Tools (%s) â€” %d available\n", baseURL, len(tools))
 	if len(tools) == 0 {
 		fmt.Fprintln(w, "  (no tools registered)")
 		return
@@ -804,7 +804,7 @@ func executeChatWithFlags(ctx context.Context, rf *runtimeFlags, stdin io.Reader
 	if !resolved.Reachable {
 		fmt.Fprintf(stdout, "Note: no live LLM endpoint detected yet (%s). Use /doctor or set OPENAI_API_KEY/ANTHROPIC_API_KEY/GEMINI_API_KEY or start Ollama.\n", resolved.Source)
 	}
-	fmt.Fprintln(stdout, "Commands: /model, /diff, /risk, /mcp, /clear, /doctor, /plan, /act, /compact, /symbols, /help, /exit")
+	fmt.Fprintln(stdout, "Commands: /model, /diff, /risk, /mcp, /clear, /doctor, /plan, /act, /compact, /symbols, /undo, /rewind, /help, /exit")
 
 	scanner := bufio.NewScanner(stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
@@ -839,7 +839,38 @@ func executeChatWithFlags(ctx context.Context, rf *runtimeFlags, stdin io.Reader
 				fmt.Fprintln(stdout, "  /doctor                          Probe gateway/core/mcp/sandbox/rid/ollama/git")
 				fmt.Fprintln(stdout, "  /plan | /act | /compact          Switch agent mode or compact conversation history")
 				fmt.Fprintln(stdout, "  /symbols [query]                 Search workspace symbols")
+				fmt.Fprintln(stdout, "  /undo | /rewind [id]             Revert last turn checkpoint or rewind to a listed one")
 				fmt.Fprintln(stdout, "  /exit                            Exit interactive chat")
+				continue
+
+			case "/undo":
+				restored, undoErr := agent.UndoLastCheckpoint(ctx, session.WorkDir)
+				if undoErr != nil {
+					fmt.Fprintf(stdout, "Undo failed: %v\n", undoErr)
+					continue
+				}
+				fmt.Fprintf(stdout, "Reverted to checkpoint %s (%s)\n", restored.ID, restored.Label)
+				continue
+
+			case "/rewind":
+				checkpoints, listErr := agent.ListCheckpoints(session.WorkDir)
+				if listErr != nil {
+					fmt.Fprintf(stdout, "Rewind failed: %v\n", listErr)
+					continue
+				}
+				if len(cmdArgs) == 0 {
+					for _, checkpoint := range checkpoints {
+						fmt.Fprintf(stdout, "%s  %s  (%d files)\n", checkpoint.ID, checkpoint.Label, len(checkpoint.Files))
+					}
+					fmt.Fprintln(stdout, "Usage: /rewind <checkpoint-id>")
+					continue
+				}
+				restored, rewindErr := agent.RestoreCheckpoint(ctx, session.WorkDir, cmdArgs[0])
+				if rewindErr != nil {
+					fmt.Fprintf(stdout, "Rewind failed: %v\n", rewindErr)
+					continue
+				}
+				fmt.Fprintf(stdout, "Rewound to checkpoint %s (%s)\n", restored.ID, restored.Label)
 				continue
 
 			case "/diff":

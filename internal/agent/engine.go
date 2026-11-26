@@ -330,7 +330,7 @@ func buildCompactionSummary(older []Message) string {
 	}
 
 	var summary strings.Builder
-	fmt.Fprintf(&summary, "[Compacted Conversation Summary — %d earlier messages]\n", len(older))
+	fmt.Fprintf(&summary, "[Compacted Conversation Summary â€” %d earlier messages]\n", len(older))
 	if len(userNotes) > 0 {
 		summary.WriteString("User requests:\n")
 		for _, note := range limitSlice(userNotes, 6) {
@@ -473,6 +473,9 @@ func (e *Engine) RunPromptWithCallback(ctx context.Context, sessionID, prompt st
 		return TurnResult{}, err
 	}
 	defer release()
+	if session, getErr := e.GetSession(ctx, sessionID); getErr == nil && session.Mode == ModeAct && !strings.HasPrefix(strings.TrimSpace(prompt), "/") {
+		_, _ = CreateCheckpoint(ctx, session.WorkDir, truncateCheckpointLabel(prompt))
+	}
 	return e.executeAcquiredTurn(turnCtx, sessionID, prompt, onEvent)
 }
 
