@@ -21,7 +21,6 @@ builds:
     flags:
       - -trimpath
     mod_timestamp: "{{ .CommitTimestamp }}"
-    # static binary ensured by CGO_ENABLED=0
 
 archives:
   - format: zip
@@ -36,5 +35,5 @@ checksum:
 
 release:
   github:
-    owner: your-org
-    name: your-repo
+    owner: A-L-L-A-H
+    name: mw-rocksoul-cli
