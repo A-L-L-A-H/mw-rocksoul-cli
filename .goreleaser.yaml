@@ -1,0 +1,40 @@
+project_name: rocksoul
+
+go_modules:
+  - path: .
+
+builds:
+  - id: rocksoul
+    main: ./cmd/rocksoul/main.go
+    binary: rocksoul
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    # static binary ensured by CGO_ENABLED=0
+
+archives:
+  - format: zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+release:
+  github:
+    owner: your-org
+    name: your-repo

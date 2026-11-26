@@ -1,0 +1,9 @@
+Id: MoonWitness.Rocksoul
+Publisher: YourOrg
+Version: ${VERSION}
+License: MIT
+InstallerType: exe
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/your-org/your-repo/releases/download/v${VERSION}/rocksoul_${VERSION}_windows_amd64.zip
+    InstallerSha256: ${HASH}

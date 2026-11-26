@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/ScoopInstaller/JSON/master/schema.json",
+  "version": "0.0.0",
+  "description": "Rocksoul CLI - cross‑platform static binary",
+  "homepage": "https://github.com/your-org/your-repo",
+  "license": "MIT",
+  "url": "https://github.com/your-org/your-repo/releases/download/v${VERSION}/rocksoul_${VERSION}_windows_amd64.zip",
+  "hash": "${HASH}",
+  "bin": "rocksoul.exe",
+  "extract_dir": "${EXTRACT_DIR}"
+}
