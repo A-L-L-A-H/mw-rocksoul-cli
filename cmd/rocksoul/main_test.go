@@ -55,6 +55,12 @@ func TestVersionAndDoctorCommands(t *testing.T) {
 	if !report.AllOK || len(report.Probes) != 6 || report.Provider.Provider != clients.ProviderGateway {
 		t.Fatalf("unexpected doctor report: %+v", report)
 	}
+	if report.DiskSweeper == nil {
+		t.Fatalf("expected diskSweeper probe in doctor report")
+	}
+	if _, ok := report.DiskSweeper["available"]; !ok {
+		t.Fatalf("expected diskSweeper.available field, got %+v", report.DiskSweeper)
+	}
 }
 
 func TestLoginAndMCPListCommands(t *testing.T) {

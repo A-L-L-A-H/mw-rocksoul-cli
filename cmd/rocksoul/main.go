@@ -124,11 +124,12 @@ func cmdVersion(args []string, stdout, stderr io.Writer) int {
 }
 
 type doctorReport struct {
-	Probes   []clients.ProbeResult      `json:"probes"`
-	Git      map[string]any             `json:"git"`
-	Provider clients.ProviderResolution `json:"provider"`
-	Config   string                     `json:"configPath"`
-	AllOK    bool                       `json:"allOk"`
+	Probes      []clients.ProbeResult      `json:"probes"`
+	Git         map[string]any             `json:"git"`
+	DiskSweeper map[string]any             `json:"diskSweeper,omitempty"`
+	Provider    clients.ProviderResolution `json:"provider"`
+	Config      string                     `json:"configPath"`
+	AllOK       bool                       `json:"allOk"`
 }
 
 func collectDoctorReport(ctx context.Context, cfg clients.UserConfig, configPath string) doctorReport {
@@ -159,6 +160,7 @@ func collectDoctorReport(ctx context.Context, cfg clients.UserConfig, configPath
 	wg.Wait()
 
 	gitInfo := probeGit(ctx)
+	diskInfo := probeDiskSweeper(ctx)
 	allOK := gitInfo["available"] == true
 	for _, p := range probes {
 		if !p.Healthy {
@@ -177,11 +179,12 @@ func collectDoctorReport(ctx context.Context, cfg clients.UserConfig, configPath
 	})
 
 	return doctorReport{
-		Probes:   probes,
-		Git:      gitInfo,
-		Provider: resolved,
-		Config:   configPath,
-		AllOK:    allOK,
+		Probes:      probes,
+		Git:         gitInfo,
+		DiskSweeper: diskInfo,
+		Provider:    resolved,
+		Config:      configPath,
+		AllOK:       allOK,
 	}
 }
 
@@ -222,6 +225,89 @@ func renderDoctorReport(w io.Writer, report doctorReport) {
 		fmt.Fprintf(w, "  [OK  ] %-8s %s (inWorkTree=%v)\n", "git", report.Git["version"], report.Git["inWorkTree"])
 	} else {
 		fmt.Fprintf(w, "  [DOWN] %-8s %v\n", "git", report.Git["error"])
+	}
+	if report.DiskSweeper != nil {
+		if report.DiskSweeper["available"] == true {
+			status, _ := report.DiskSweeper["status"].(string)
+			binPath, _ := report.DiskSweeper["binary"].(string)
+			badge := "OK  "
+			if status == "warn" || status == "critical" {
+				badge = "WARN"
+			}
+			fmt.Fprintf(w, "  [%s] %-8s status=%s (%s)\n", badge, "mw-ww", status, binPath)
+		} else {
+			hint, _ := report.DiskSweeper["hint"].(string)
+			fmt.Fprintf(w, "  [INFO] %-8s not installed (%s)\n", "mw-ww", hint)
+		}
+	}
+}
+
+func resolveDiskSweeperBinary() string {
+	binName := "mw-ww-cli"
+	if runtime.GOOS == "windows" {
+		binName = "mw-ww-cli.exe"
+	}
+	if p, err := exec.LookPath(binName); err == nil {
+		return p
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidate := filepath.Join(home, ".local", "bin", binName)
+		if fi, statErr := os.Stat(candidate); statErr == nil && !fi.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func probeDiskSweeper(ctx context.Context) map[string]any {
+	binPath := resolveDiskSweeperBinary()
+	if binPath == "" {
+		return map[string]any{
+			"available": false,
+			"hint":      "install mw-ww-cli (A-L-L-A-H/mw-ww) for disk guard",
+		}
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(cmdCtx, binPath, "--drives", "--json").Output()
+	if err != nil {
+		return map[string]any{
+			"available": true,
+			"binary":    binPath,
+			"status":    "error",
+			"error":     err.Error(),
+		}
+	}
+	var drives []struct {
+		Drive   string `json:"drive"`
+		Total   int64  `json:"total"`
+		Free    int64  `json:"free"`
+		UsedPct int    `json:"usedPct"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &drives); err != nil {
+		return map[string]any{
+			"available": true,
+			"binary":    binPath,
+			"status":    "error",
+			"error":     err.Error(),
+		}
+	}
+	worst := "ok"
+	for _, d := range drives {
+		if d.Status == "critical" {
+			worst = "critical"
+			break
+		}
+		if d.Status == "warn" {
+			worst = "warn"
+		}
+	}
+	return map[string]any{
+		"available": true,
+		"binary":    binPath,
+		"status":    worst,
+		"drives":    drives,
 	}
 }
 
