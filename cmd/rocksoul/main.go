@@ -796,13 +796,48 @@ func buildEngineBundle(
 		HTTPClient:          resolved.HTTPClient,
 		MaxSteps:            rf.maxSteps,
 		RiskGate:            gate,
-		ApprovalResolver:    tokenVault.Resolve,
+		ApprovalResolver:    composeApprovalResolver(tokenVault, buildMobileApprovalBridgeFromEnv(gate)),
 		MCPCaller:           mcpClient,
 	})
 	if err != nil {
 		return nil, nil, resolved, endpoints, err
 	}
 	return engine, gate, resolved, endpoints, nil
+}
+
+func buildMobileApprovalBridgeFromEnv(gate *risk.Gate) *clients.MobileApprovalBridge {
+	var transports []clients.ApprovalTransport
+	if ntfy, err := clients.NewNtfyApprovalTransportFromEnv(); err == nil {
+		transports = append(transports, ntfy)
+	}
+	if tg, err := clients.NewTelegramApprovalTransportFromEnv(); err == nil {
+		transports = append(transports, tg)
+	}
+	if len(transports) == 0 {
+		return nil
+	}
+	return clients.NewMobileApprovalBridge(clients.MobileApprovalOptions{
+		Gate:                  gate,
+		Transports:            transports,
+		CallbackBaseURL:       strings.TrimSpace(os.Getenv("ROCKSOUL_APPROVAL_CALLBACK_URL")),
+		Secret:                []byte(strings.TrimSpace(os.Getenv("ROCKSOUL_POCKET_APPROVAL_SECRET"))),
+		CallbackToken:         strings.TrimSpace(os.Getenv("ROCKSOUL_APPROVAL_CALLBACK_TOKEN")),
+		TelegramWebhookSecret: strings.TrimSpace(os.Getenv("TELEGRAM_WEBHOOK_SECRET")),
+	})
+}
+
+func composeApprovalResolver(vault *pendingTokenVault, mobile *clients.MobileApprovalBridge) agent.ApprovalResolver {
+	return func(ctx context.Context, action risk.Action, decision risk.Decision) (string, error) {
+		if vault != nil {
+			if tok, err := vault.Resolve(ctx, action, decision); err == nil && strings.TrimSpace(tok) != "" {
+				return tok, nil
+			}
+		}
+		if mobile != nil && decision.Tier >= risk.TierR3 {
+			return mobile.Resolve(ctx, action, decision)
+		}
+		return "", nil
+	}
 }
 
 func executeRunWithFlags(ctx context.Context, rf *runtimeFlags, prompt string, stdout, stderr io.Writer) int {
@@ -1194,6 +1229,10 @@ func cmdPlan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	cfg, _ := clients.LoadUserConfig(clients.DefaultConfigPath())
 	rf := registerRuntimeFlags(fs, cfg)
+	loopFlag := fs.Bool("loop", false, "execute all ready tasks sequentially until done or blocked")
+	commitFlag := fs.Bool("commit", false, "create path-scoped git commit after each verified task")
+	verifyCmd := fs.String("verify", "", "verification command to run before committing each task")
+	maxTasks := fs.Int("max-tasks", 0, "maximum number of tasks to execute in --loop mode (0 = unlimited)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -1260,30 +1299,54 @@ func cmdPlan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 
-		executed, runErr := agent.RunTaskOSLoop(ctx, engine, absDir, resolved.Model, func(ev agent.AgentEvent) {
-			if rf.asJSON {
-				return
-			}
-			switch ev.Type {
-			case "tool_call":
-				fmt.Fprintf(stderr, "  [tool] %s %s\n", ev.ToolName, ev.Arguments)
-			case "risk_blocked":
-				fmt.Fprintf(stderr, "  [risk %s] blocked %s: %s\n", ev.RiskTier, ev.ToolName, ev.Error)
-			}
+		loopResult, runErr := agent.RunTaskOSLoopWithOptions(ctx, engine, absDir, agent.TaskOSLoopOptions{
+			Model:         resolved.Model,
+			Loop:          *loopFlag,
+			Commit:        *commitFlag,
+			VerifyCommand: *verifyCmd,
+			MaxTasks:      *maxTasks,
+			Callback: func(ev agent.AgentEvent) {
+				if rf.asJSON {
+					return
+				}
+				switch ev.Type {
+				case "tool_call":
+					fmt.Fprintf(stderr, "  [tool] %s %s\n", ev.ToolName, ev.Arguments)
+				case "risk_blocked":
+					fmt.Fprintf(stderr, "  [risk %s] blocked %s: %s\n", ev.RiskTier, ev.ToolName, ev.Error)
+				}
+			},
 		})
 		if runErr != nil {
-			fmt.Fprintf(stderr, "Task execution failed: %v\n", runErr)
+			if rf.asJSON && loopResult != nil {
+				_ = json.NewEncoder(stdout).Encode(map[string]any{
+					"error":  runErr.Error(),
+					"result": loopResult,
+				})
+			} else {
+				fmt.Fprintf(stderr, "Task execution failed: %v\n", runErr)
+			}
 			return 1
 		}
-		if executed == nil {
-			fmt.Fprintln(stdout, "No tasks ready to run.")
+		if loopResult == nil || len(loopResult.ExecutedTasks) == 0 {
+			if rf.asJSON {
+				_ = json.NewEncoder(stdout).Encode(agent.TaskOSLoopResult{PlanStatus: plan.Status})
+			} else {
+				fmt.Fprintln(stdout, "No tasks ready to run.")
+			}
 			return 0
 		}
 		if rf.asJSON {
-			_ = json.NewEncoder(stdout).Encode(executed)
+			_ = json.NewEncoder(stdout).Encode(loopResult)
 			return 0
 		}
-		fmt.Fprintf(stdout, "Executed task %s (%s): %s\n", executed.ID, executed.Status, executed.Title)
+		for _, executed := range loopResult.ExecutedTasks {
+			if executed.CommitSHA != "" {
+				fmt.Fprintf(stdout, "Executed task %s (%s) [commit %s]: %s\n", executed.ID, executed.Status, executed.CommitSHA[:7], executed.Title)
+			} else {
+				fmt.Fprintf(stdout, "Executed task %s (%s): %s\n", executed.ID, executed.Status, executed.Title)
+			}
+		}
 		return 0
 
 	default:

@@ -3,16 +3,43 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+
 jobs:
-  ci:
+  go-cli:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOMEMLIMIT: 2GiB
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.27'
+          cache: true
       - run: go vet ./...
-      - run: go test -count=1 ./...
+      - run: go test -p 2 -count=1 ./...
       - run: CGO_ENABLED=0 go build ./...
+
+  bun-plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
       - run: bun test plugins/opencode-rocksoul/tests/plugin.test.ts
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

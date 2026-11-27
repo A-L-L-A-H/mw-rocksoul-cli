@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/A-L-L-A-H/mw-rocksoul-cli/internal/agent"
 	"github.com/A-L-L-A-H/mw-rocksoul-cli/internal/clients"
 )
 
@@ -199,6 +201,102 @@ func TestInitTUICommand(t *testing.T) {
 		}
 		if !strings.Contains(string(raw), "http://127.0.0.1:4510/v1") || !strings.Contains(string(raw), "http://127.0.0.1:4530/mcp") {
 			t.Fatalf("%s missing Rocksoul endpoints: %s", tc.wantFile, string(raw))
+		}
+	}
+}
+
+func TestPlanRunLoopAndCommitSubcommand(t *testing.T) {
+	workDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "cli@rocksoul.local"},
+		{"config", "user.name", "Rocksoul CLI"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", workDir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("root\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("git", "-C", workDir, "add", "README.md").Run()
+	_ = exec.Command("git", "-C", workDir, "commit", "-m", "initial").Run()
+
+	// Create two files that represent work owned by T01 and T02.
+	if err := os.WriteFile(filepath.Join(workDir, "one.txt"), []byte("task one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "two.txt"), []byte("task two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := &agent.TaskOSPlan{
+		ID:     "cli-plan",
+		Title:  "CLI Loop Plan",
+		Status: "pending",
+		Tasks: []agent.TaskOSMicroTask{
+			{ID: "T01", Title: "Commit one.txt", OwnerFiles: []string{"one.txt"}, Status: "pending"},
+			{ID: "T02", Title: "Commit two.txt", OwnerFiles: []string{"two.txt"}, Dependencies: []string{"T01"}, Status: "pending"},
+		},
+	}
+	if err := agent.SavePlan(workDir, plan); err != nil {
+		t.Fatal(err)
+	}
+
+	mockGW := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/health" {
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"c1","model":"rocksoul-test","choices":[{"index":0,"message":{"role":"assistant","content":"task completed"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}`))
+	}))
+	defer mockGW.Close()
+
+	t.Setenv("ROCKSOUL_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv("ROCKSOUL_TOKEN_PATH", filepath.Join(t.TempDir(), "token.json"))
+	t.Setenv("ROCKSOUL_GATEWAY_URL", mockGW.URL)
+
+	var stdout, stderr bytes.Buffer
+	code := runCLI(
+		context.Background(),
+		[]string{"plan", "run", "--loop", "--commit", "--dir", workDir, "--json"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("plan run --loop --commit failed: code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+	var res agent.TaskOSLoopResult
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("decode plan run json: %v (%s)", err, stdout.String())
+	}
+	if res.PlanStatus != "completed" || len(res.ExecutedTasks) != 2 || len(res.Commits) != 2 {
+		t.Fatalf("expected 2 completed tasks and 2 commits, got %+v", res)
+	}
+}
+
+func TestInstallScriptSyntaxAndChecksumVerification(t *testing.T) {
+	scriptPath := filepath.Clean(filepath.Join("..", "..", "scripts", "install.sh"))
+	if _, err := os.Stat(scriptPath); err != nil {
+		t.Fatalf("expected scripts/install.sh at %s: %v", scriptPath, err)
+	}
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"verify_sha256",
+		"sha256sum",
+		"shasum -a 256",
+		"install_release_binary \"rocksoul\"",
+		"install_release_binary \"mw-ww-cli\"",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("scripts/install.sh missing %q", want)
 		}
 	}
 }
