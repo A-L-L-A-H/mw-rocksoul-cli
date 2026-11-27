@@ -58,6 +58,8 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return cmdRun(ctx, args[1:], stdout, stderr)
 	case "chat":
 		return cmdChat(ctx, args[1:], stdin, stdout, stderr)
+	case "plan":
+		return cmdPlan(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printRootUsage(stdout)
 		return 0
@@ -78,6 +80,7 @@ Usage:
   rocksoul "<prompt>"             Run a direct one-shot coding task
   rocksoul run [flags] <prompt>   Run a one-shot coding agent turn
   rocksoul chat [flags]           Start interactive terminal chat
+  rocksoul plan next|run|status   Execute or inspect TaskOS micro-task plan loop
   rocksoul doctor [--json]        Probe gateway/core/mcp/sandbox/rid/ollama/git
   rocksoul login [flags]          Inspect mw-rid token status or generate PKCE login URL
   rocksoul mcp list [--json]      List tools exposed by mw-rocksoul-mcp (:4530)
@@ -733,7 +736,9 @@ func executeRunWithFlags(ctx context.Context, rf *runtimeFlags, prompt string, s
 		return 1
 	}
 
-	reply, runErr := engine.RunOneShot(ctx, absDir, rf.profile, resolved.Model, rf.mode, prompt, func(ev agent.AgentEvent) {
+	effectivePrompt, _, _ := agent.ResolveAtMentions(ctx, absDir, prompt)
+
+	reply, runErr := engine.RunOneShot(ctx, absDir, rf.profile, resolved.Model, rf.mode, effectivePrompt, func(ev agent.AgentEvent) {
 		if rf.asJSON {
 			return
 		}
@@ -1021,7 +1026,9 @@ func executeChatWithFlags(ctx context.Context, rf *runtimeFlags, stdin io.Reader
 			}
 		}
 
-		outcome, runErr := engine.RunPromptWithCallback(ctx, session.ID, line, func(ev agent.AgentEvent) {
+		effectiveLine, _, _ := agent.ResolveAtMentions(ctx, session.WorkDir, line)
+
+		outcome, runErr := engine.RunPromptWithCallback(ctx, session.ID, effectiveLine, func(ev agent.AgentEvent) {
 			switch ev.Type {
 			case "tool_call":
 				fmt.Fprintf(stderr, "  [tool] %s %s\n", ev.ToolName, ev.Arguments)
@@ -1088,4 +1095,113 @@ func loadSavedAccessToken(tokenPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(tok.AccessToken)
+}
+
+func cmdPlan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: rocksoul plan next|run|status [--dir <path>]")
+		return 2
+	}
+	sub := strings.ToLower(strings.TrimSpace(args[0]))
+
+	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cfg, _ := clients.LoadUserConfig(clients.DefaultConfigPath())
+	rf := registerRuntimeFlags(fs, cfg)
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+
+	absDir, err := filepath.Abs(rf.dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve dir: %v\n", err)
+		return 1
+	}
+
+	plan, err := agent.LoadPlan(absDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "load plan: %v\n", err)
+		return 1
+	}
+
+	switch sub {
+	case "status":
+		if plan == nil {
+			fmt.Fprintf(stdout, "No plan found at %s\n", agent.PlanFilePath(absDir))
+			return 0
+		}
+		if rf.asJSON {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(plan)
+			return 0
+		}
+		fmt.Fprintf(stdout, "Plan %s [%s] (%d tasks)\n", plan.ID, plan.Status, len(plan.Tasks))
+		for _, t := range plan.Tasks {
+			fmt.Fprintf(stdout, "  [%s] %s: %s\n", t.Status, t.ID, t.Title)
+		}
+		return 0
+
+	case "next":
+		if plan == nil {
+			fmt.Fprintf(stdout, "No plan found at %s\n", agent.PlanFilePath(absDir))
+			return 1
+		}
+		ready := plan.NextReadyTask()
+		if ready == nil {
+			fmt.Fprintln(stdout, "No tasks ready to execute.")
+			return 0
+		}
+		if rf.asJSON {
+			_ = json.NewEncoder(stdout).Encode(ready)
+			return 0
+		}
+		fmt.Fprintf(stdout, "Next ready task: [%s] %s: %s\n", ready.Status, ready.ID, ready.Title)
+		if len(ready.OwnerFiles) > 0 {
+			fmt.Fprintf(stdout, "Owner files: %s\n", strings.Join(ready.OwnerFiles, ", "))
+		}
+		return 0
+
+	case "run":
+		if plan == nil {
+			fmt.Fprintf(stdout, "No plan found at %s\n", agent.PlanFilePath(absDir))
+			return 1
+		}
+		vault := newPendingTokenVault(rf.approveToken)
+		engine, _, resolved, _, err := buildEngineBundle(ctx, rf, cfg, vault)
+		if err != nil {
+			fmt.Fprintf(stderr, "engine init error: %v\n", err)
+			return 2
+		}
+
+		executed, runErr := agent.RunTaskOSLoop(ctx, engine, absDir, resolved.Model, func(ev agent.AgentEvent) {
+			if rf.asJSON {
+				return
+			}
+			switch ev.Type {
+			case "tool_call":
+				fmt.Fprintf(stderr, "  [tool] %s %s\n", ev.ToolName, ev.Arguments)
+			case "risk_blocked":
+				fmt.Fprintf(stderr, "  [risk %s] blocked %s: %s\n", ev.RiskTier, ev.ToolName, ev.Error)
+			}
+		})
+		if runErr != nil {
+			fmt.Fprintf(stderr, "Task execution failed: %v\n", runErr)
+			return 1
+		}
+		if executed == nil {
+			fmt.Fprintln(stdout, "No tasks ready to run.")
+			return 0
+		}
+		if rf.asJSON {
+			_ = json.NewEncoder(stdout).Encode(executed)
+			return 0
+		}
+		fmt.Fprintf(stdout, "Executed task %s (%s): %s\n", executed.ID, executed.Status, executed.Title)
+		return 0
+
+	default:
+		fmt.Fprintf(stderr, "unknown plan subcommand: %s. Valid subcommands: next, run, status\n", sub)
+		return 2
+	}
 }
